@@ -1,0 +1,263 @@
+-- Initializing global variables to store the latest game state and game host process.
+LatestGameState = LatestGameState or nil
+InAction = InAction or false -- Prevents the agent from taking multiple actions at once.
+NearestEnemy =NearestEnemy or nil
+
+Logs = Logs or {}
+
+Colors = {
+  red = "\27[31m",
+  green = "\27[32m",
+  blue = "\27[34m",
+  reset = "\27[0m",
+  gray = "\27[90m"
+}
+
+
+
+function TotalNumber()
+  local number=0
+
+  for target, state in pairs(LatestGameState.Players) do
+    if target ~= ao.id and state.health >= LatestGameState.Players[ao.id].health then
+       number=number+1
+    end
+    if number>=2 then
+      break
+    end
+  end
+
+  if number>=2 then
+    return false
+  else
+    return true
+  end
+
+end
+
+-- Find the weakest
+function FindWeakestEnemy()
+  local weakestPlayer = nil
+  local minHealth = math.huge
+
+  for target, state in pairs(LatestGameState.Players) do
+      if target ~= ao.id and state.health < minHealth then
+          weakestPlayer = state
+          minHealth = state.health
+      end
+  end
+
+  return weakestPlayer
+end
+
+-- Calculate boundaries
+function IsValidPosition(x, y)
+  return x >= 0 and x <= LatestGameState.GameWidth and y >= 0 and y <= LatestGameState.GameHeight
+end
+
+function CalculateMove(direction,me,enemy)
+  local dx=0
+  local dy=0
+  if direction==false then
+     dx = me.x - enemy.x
+     dy = me.y - enemy.y 
+  else
+     dx = enemy.x - me.x 
+     dy = enemy.y - me.y 
+  end
+
+  local directionMap = {
+      {x = 0, y = -1,direction="Up"}, 
+      {x = 0, y = 1,direction="Down"},
+      {x = -1, y = 0,direction="Left"},
+      {x = 1, y = 0,direction="Right"},
+      {x = 1, y = -1,direction="UpRight"},
+      {x = -1, y = -1,direction="UpLeft"},
+      {x = 1, y = 1,direction="DownRight"},
+      {x = -1, y = 1,direction="DownLeft"}
+  }
+
+  if dx>0 then dx=1
+  elseif dx==0 then dx=0
+  else dx=-1
+  end
+
+  if dy>0 then dy=1
+  elseif dy==0 then dy=0
+  else dy=-1
+  end
+
+  local directionStr=nil
+  for _, vector in pairs(directionMap) do
+    if vector.x == dx and vector.y == dy then
+      directionStr= vector.direction
+      break
+    end
+  end
+
+  local newX=me.x+dx
+  local newY=me.y+dy
+  if IsValidPosition(newX,newY) and directionStr~=nil then
+    ao.send({ Target = Game, Action = "PlayerMove", Player = ao.id, Direction=tostring(directionStr)})
+  elseif IsValidPosition(newX,newY)==false then
+    local isContinue=true
+    while isContinue do
+      local randomIndex = math.random(#directionMap)
+      local directionData = directionMap[randomIndex]
+      local newX=me.x+directionData.x
+      local newY=me.y+directionData.y
+      if IsValidPosition(newX,newY) then
+        ao.send({ Target = Game, Action = "PlayerMove", Player = ao.id, Direction=directionData.direction})
+        isContinue=false
+      end
+    end
+    
+  end
+end
+
+function RandomMovement(nearby)
+  local me = LatestGameState.Players[ao.id]
+  if nearby then
+    CalculateMove(false,me,nearby)
+  end
+end
+
+
+function MoveToEnemy()
+  local me = LatestGameState.Players[ao.id]
+  if NearestEnemy then
+    CalculateMove(true,me,NearestEnemy)
+  end
+end
+
+
+function AttackNearestEnemy()
+
+  -- If you find the one with the lowest health, then don't look for it
+  if not NearestEnemy then
+    NearestEnemy = FindWeakestEnemy()
+  end
+  local me = LatestGameState.Players[ao.id]
+
+  
+  local targetInRange = false
+  if NearestEnemy and InRange(me.x, me.y, NearestEnemy.x, NearestEnemy.y, 1) then
+    targetInRange = true
+  end
+
+  -- If it's near him, launch an attack. If it's not there, continue moving
+  if targetInRange then
+      local attackEnergy = me.energy * 0.5 
+      print(Colors.red .. "Attacking nearest enemy with energy: " .. attackEnergy .. Colors.reset)
+      ao.send({ Target = Game, Action = "PlayerAttack", Player = ao.id, AttackEnergy = tostring(attackEnergy) })
+  elseif targetInRange == false then
+    MoveToEnemy()
+  end
+end
+
+-- Decide whether to evade or pursue the next step
+function AttackWeakestPlayer()
+  local me = LatestGameState.Players[ao.id]
+  local nearby=nil;
+  local index=0;
+
+  --Find people nearby
+  for target, state in pairs(LatestGameState.Players) do
+    if target ~= ao.id and InRange(me.x, me.y, state.x, state.y, 5) then
+      index=index+1
+      nearby=state
+    end
+  end
+
+
+  local isFighting=TotalNumber()
+
+  if isFighting==true then
+    --The remaining three people will fight
+    AttackNearestEnemy()
+  elseif index >= 1 then
+    -- escape
+    RandomMovement(nearby)
+  end
+  
+  
+end
+
+function InRange(x1, y1, x2, y2, range)
+  return math.abs(x1 - x2) <= range and math.abs(y1 - y2) <= range
+end
+
+function DecideNextAction()
+  if not InAction then
+      InAction = true
+      AttackWeakestPlayer()
+      InAction = false
+  end
+end
+
+
+
+
+Handlers.add(
+  "PrintAnnouncements",
+  Handlers.utils.hasMatchingTag("Action", "Announcement"),
+  function (msg)
+    if msg.Event == "Started-Waiting-Period" then
+      ao.send({Target = ao.id, Action = "AutoPay"})
+    elseif (msg.Event == "Tick" or msg.Event == "Started-Game") and not InAction then
+      InAction = true -- InAction logic added
+      ao.send({Target = Game, Action = "GetGameState"})
+    elseif InAction then -- InAction logic added
+      print("Previous action still in progress. Skipping.")
+    end
+    print(Colors.green .. msg.Event .. ": " .. msg.Data .. Colors.reset)
+  end
+)
+
+Handlers.add(
+  "GetGameStateOnTick",
+  Handlers.utils.hasMatchingTag("Action", "Tick"),
+  function ()
+    if not InAction then -- InAction logic added
+      InAction = true -- InAction logic added
+      print(Colors.gray .. "Getting game state..." .. Colors.reset)
+      ao.send({Target = Game, Action = "GetGameState"})
+    else
+      print("Previous action still in progress. Skipping.")
+    end
+  end
+)
+
+Handlers.add(
+  "AutoPay",
+  Handlers.utils.hasMatchingTag("Action", "AutoPay"),
+  function (msg)
+    print("Auto-paying confirmation fees.")
+    ao.send({ Target = Game, Action = "Transfer", Recipient = Game, Quantity = "1000"})
+  end
+)
+
+Handlers.add(
+  "UpdateGameState",
+  Handlers.utils.hasMatchingTag("Action", "GameState"),
+  function (msg)
+    local json = require("json")
+    LatestGameState = json.decode(msg.Data)
+    ao.send({Target = ao.id, Action = "UpdatedGameState"})
+    print("Game state updated. Print \'LatestGameState\' for detailed view.")
+  end
+)
+
+Handlers.add(
+  "decideNextAction",
+  Handlers.utils.hasMatchingTag("Action", "UpdatedGameState"),
+  function ()
+    if LatestGameState.GameMode ~= "Playing" then
+      InAction = false -- InAction logic added
+      return
+    end
+    print("Deciding next action.")
+    DecideNextAction()
+    ao.send({Target = ao.id, Action = "Tick"})
+  end
+)
